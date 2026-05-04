@@ -1,0 +1,62 @@
+# =========================
+# Flutter / Dart
+# =========================
+.dart_tool/
+.packages
+.pub/
+.pub-cache/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# =========================
+# Build outputs (CRITICAL)
+# =========================
+build/
+**/build/
+android/app/.cxx/
+.cxx/
+.gradle/
+.android/
+
+# APK / App Bundles
+*.apk
+*.aab
+
+# =========================
+# Platform-specific
+# =========================
+
+# Android
+android/local.properties
+android/.gradle/
+
+# iOS
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+
+# macOS
+macos/Flutter/Flutter.framework
+
+# =========================
+# IDE / Editor
+# =========================
+.idea/
+*.iml
+.vscode/
+
+# =========================
+# Logs / temp
+# =========================
+*.log
+*.tmp
+
+# =========================
+# System files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Misc
+# =========================
+local.properties
