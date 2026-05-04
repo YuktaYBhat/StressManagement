@@ -1,14 +1,16 @@
 package com.managestress.app;
+
 import android.Manifest;
-import android.annotation.SuppressLint;
-import android.os.Bundle;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
+import android.os.Bundle;
 import android.util.Log;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
-import androidx.core.app.ActivityCompat;
+import androidx.annotation.Nullable;
 import androidx.core.content.ContextCompat;
 
 import com.google.android.gms.auth.api.signin.GoogleSignIn;
@@ -20,52 +22,60 @@ import com.google.android.gms.fitness.Fitness;
 import com.google.android.gms.fitness.FitnessOptions;
 import com.google.android.gms.fitness.data.Bucket;
 import com.google.android.gms.fitness.data.DataPoint;
-//import com.google.android.gms.fitness.data.DataReadRequest;
-//import com.google.android.gms.fitness.data.DataReadResponse;
-import com.google.android.gms.fitness.request.DataReadRequest;
-import com.google.android.gms.fitness.result.DataReadResponse;
 import com.google.android.gms.fitness.data.DataSet;
 import com.google.android.gms.fitness.data.DataSource;
 import com.google.android.gms.fitness.data.DataType;
 import com.google.android.gms.fitness.data.Field;
+import com.google.android.gms.fitness.request.DataReadRequest;
+import com.google.android.gms.fitness.result.DataReadResponse;
 import com.google.android.gms.tasks.Task;
 import com.google.android.gms.tasks.Tasks;
 
-import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.HashMap;
-import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
+import io.flutter.embedding.android.FlutterFragmentActivity;
 import io.flutter.embedding.engine.FlutterEngine;
-import io.flutter.embedding.android.FlutterActivity;
 import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
-import com.managestress.app.BuildConfig;
 
-@SuppressWarnings({"deprecation", "unused"})
-@SuppressLint({"NewApi", "MissingPermission"})
-public class MainActivity extends FlutterActivity {
+public class MainActivity extends FlutterFragmentActivity {
 	private static final String CHANNEL = "stress_sense/google_fit";
-	private static final int RC_SIGN_IN = 100;
-	private static final int RC_FIT_PERMISSIONS = 7002;
-	private static final int RC_RUNTIME_PERMISSIONS = 7003;
 	private static final String TAG = "StressSenseAuth";
+	private static final int RC_FIT_PERMISSIONS = 7002;
+
+	private enum PendingFlow {
+		NONE,
+		SIGN_IN,
+		REQUEST_FITNESS_PERMISSIONS,
+		FETCH_LIVE_METRICS
+	}
 
 	private GoogleSignInClient googleSignInClient;
 	private FitnessOptions fitnessOptions;
-
 	private MethodChannel.Result pendingResult;
-	private String pendingAction;
+	private PendingFlow pendingFlow = PendingFlow.NONE;
+	private ActivityResultLauncher<Intent> signInLauncher;
+	private ActivityResultLauncher<String[]> runtimePermissionsLauncher;
 
 	@Override
 	protected void onCreate(Bundle savedInstanceState) {
 		super.onCreate(savedInstanceState);
+		initializeGoogleClients();
+		registerLaunchers();
+	}
 
-		// Initialize Google Sign-In and FitnessOptions here. If the FlutterEngine
-		// is not yet attached, skip MethodChannel registration to avoid null refs.
-		final GoogleSignInOptions signInOptions = new GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+	@Override
+	public void configureFlutterEngine(@NonNull FlutterEngine flutterEngine) {
+		super.configureFlutterEngine(flutterEngine);
+		new MethodChannel(flutterEngine.getDartExecutor().getBinaryMessenger(), CHANNEL).setMethodCallHandler(this::handleMethodCall);
+	}
+
+	private void initializeGoogleClients() {
+		GoogleSignInOptions signInOptions = new GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
 				.requestEmail()
 				.build();
 		googleSignInClient = GoogleSignIn.getClient(this, signInOptions);
@@ -74,13 +84,18 @@ public class MainActivity extends FlutterActivity {
 				.addDataType(DataType.TYPE_HEART_RATE_BPM, FitnessOptions.ACCESS_READ)
 				.addDataType(DataType.TYPE_STEP_COUNT_DELTA, FitnessOptions.ACCESS_READ)
 				.build();
+	}
 
-		if (getFlutterEngine() != null && getFlutterEngine().getDartExecutor() != null) {
-			new MethodChannel(getFlutterEngine().getDartExecutor().getBinaryMessenger(), CHANNEL)
-					.setMethodCallHandler(this::handleMethodCall);
-		} else {
-			Log.w(TAG, "FlutterEngine not attached yet; MethodChannel registration deferred.");
-		}
+	private void registerLaunchers() {
+		signInLauncher = registerForActivityResult(
+				new ActivityResultContracts.StartActivityForResult(),
+				result -> handleSignInResult(result.getResultCode(), result.getData())
+		);
+
+		runtimePermissionsLauncher = registerForActivityResult(
+				new ActivityResultContracts.RequestMultiplePermissions(),
+				permissions -> handleRuntimePermissionsResult(permissions)
+		);
 	}
 
 	private void handleMethodCall(@NonNull MethodCall call, @NonNull MethodChannel.Result result) {
@@ -107,10 +122,105 @@ public class MainActivity extends FlutterActivity {
 	}
 
 	private void startSignInFlow(@NonNull MethodChannel.Result result) {
-		Log.d(TAG, "Login button flow triggered: starting Google Sign-In intent.");
+		Log.d(TAG, "Starting Google sign-in flow.");
 
+		if (!ensureRuntimePermissionsOrQueue(PendingFlow.SIGN_IN, result)) {
+			return;
+		}
+
+		launchGoogleSignIn(result);
+	}
+
+	private void requestFitnessPermissions(@NonNull MethodChannel.Result result) {
+		GoogleSignInAccount account = getSignedInAccount();
+		if (account == null) {
+			result.success(buildAuthStateWithMessage("Please sign in with Google first."));
+			return;
+		}
+
+		if (!ensureRuntimePermissionsOrQueue(PendingFlow.REQUEST_FITNESS_PERMISSIONS, result)) {
+			return;
+		}
+
+		requestGoogleFitPermissions(account, result, PendingFlow.REQUEST_FITNESS_PERMISSIONS);
+	}
+
+	private void fetchLiveMetrics(@NonNull MethodChannel.Result result) {
+		GoogleSignInAccount account = getSignedInAccount();
+		if (account == null) {
+			result.success(buildErrorMetrics("User is not signed in with Google."));
+			return;
+		}
+
+		if (!ensureRuntimePermissionsOrQueue(PendingFlow.FETCH_LIVE_METRICS, result)) {
+			return;
+		}
+
+		if (!hasFitPermissions(account)) {
+			requestGoogleFitPermissions(account, result, PendingFlow.FETCH_LIVE_METRICS);
+			return;
+		}
+
+		readLiveMetrics(result);
+	}
+
+	private boolean ensureRuntimePermissionsOrQueue(@NonNull PendingFlow flow, @NonNull MethodChannel.Result result) {
+		if (hasRuntimePermissions()) {
+			return true;
+		}
+
+		if (pendingResult != null) {
+			result.error("PENDING", "Another permission request is already running.", null);
+			return false;
+		}
+
+		pendingResult = result;
+		pendingFlow = flow;
+		runtimePermissionsLauncher.launch(requiredRuntimePermissions());
+		return false;
+	}
+
+	private void handleRuntimePermissionsResult(@NonNull Map<String, Boolean> permissions) {
+		if (pendingResult == null) {
+			return;
+		}
+
+		boolean granted = true;
+		for (String permission : requiredRuntimePermissions()) {
+			Boolean allowed = permissions.get(permission);
+			if (!Boolean.TRUE.equals(allowed)) {
+				granted = false;
+				break;
+			}
+		}
+
+		MethodChannel.Result result = pendingResult;
+		PendingFlow flow = pendingFlow;
+		clearPending();
+
+		if (!granted) {
+			result.success(buildAuthStateWithMessage("Runtime permissions were denied."));
+			return;
+		}
+
+		switch (flow) {
+			case SIGN_IN:
+				launchGoogleSignIn(result);
+				break;
+			case REQUEST_FITNESS_PERMISSIONS:
+				requestFitnessPermissions(result);
+				break;
+			case FETCH_LIVE_METRICS:
+				fetchLiveMetrics(result);
+				break;
+			default:
+				result.success(buildAuthState());
+				break;
+		}
+	}
+
+	private void launchGoogleSignIn(@NonNull MethodChannel.Result result) {
 		if (googleSignInClient == null) {
-			Log.e(TAG, "GoogleSignInClient is null. Cannot start sign-in.");
 			result.success(buildAuthStateWithMessage("Google Sign-In client was not initialized."));
 			return;
 		}
@@ -121,59 +231,101 @@ public class MainActivity extends FlutterActivity {
 		}
 
 		pendingResult = result;
-		pendingAction = "signInInteractive";
-		Log.d(TAG, "Calling startActivityForResult for Google Sign-In.");
-		startActivityForResult(googleSignInClient.getSignInIntent(), RC_SIGN_IN);
+		pendingFlow = PendingFlow.SIGN_IN;
+		signInLauncher.launch(googleSignInClient.getSignInIntent());
 	}
 
-	private void requestFitnessPermissions(@NonNull MethodChannel.Result result) {
-		GoogleSignInAccount account = GoogleSignIn.getLastSignedInAccount(this);
-		if (account == null) {
-			result.success(buildAuthState());
+	private void handleSignInResult(int resultCode, @Nullable Intent data) {
+		if (pendingResult == null || pendingFlow != PendingFlow.SIGN_IN) {
 			return;
 		}
 
-		if (!hasRuntimePermissions()) {
-			requestRuntimePermissions("requestFitnessPermissions", result);
+		if (resultCode != RESULT_OK || data == null) {
+			completePendingWithError("Sign-in was cancelled.");
 			return;
 		}
 
-		ensureFitPermissions(account, "requestFitnessPermissions", result);
+		try {
+			GoogleSignInAccount account = GoogleSignIn.getSignedInAccountFromIntent(data).getResult(ApiException.class);
+			if (account == null) {
+				completePendingWithError("Google sign-in did not return an account.");
+				return;
+			}
+
+			if (hasFitPermissions(account)) {
+				MethodChannel.Result result = pendingResult;
+				clearPending();
+				result.success(buildAuthState());
+				return;
+			}
+
+			requestGoogleFitPermissions(account, pendingResult, PendingFlow.SIGN_IN);
+		} catch (ApiException exception) {
+			Log.e(TAG, "Google sign-in failed with code=" + exception.getStatusCode(), exception);
+			completePendingWithError("Google sign-in failed.");
+		}
 	}
 
-	private void ensureFitPermissions(
+	@SuppressWarnings("deprecation")
+	@Override
+	protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+		super.onActivityResult(requestCode, resultCode, data);
+
+		if (requestCode != RC_FIT_PERMISSIONS || pendingResult == null) {
+			return;
+		}
+
+		GoogleSignInAccount account = getSignedInAccount();
+		if (account != null && hasFitPermissions(account)) {
+			MethodChannel.Result result = pendingResult;
+			PendingFlow flow = pendingFlow;
+			clearPending();
+
+			switch (flow) {
+				case REQUEST_FITNESS_PERMISSIONS:
+				case SIGN_IN:
+					result.success(buildAuthState());
+					break;
+				case FETCH_LIVE_METRICS:
+					readLiveMetrics(result);
+					break;
+				default:
+					result.success(buildAuthState());
+					break;
+			}
+			return;
+		}
+
+		completePendingWithError("Google Fit permission denied.");
+	}
+
+	private void requestGoogleFitPermissions(
 			@NonNull GoogleSignInAccount account,
-			@NonNull String action,
-			@NonNull MethodChannel.Result result
+			@NonNull MethodChannel.Result result,
+			@NonNull PendingFlow flow
 	) {
-		if (GoogleSignIn.hasPermissions(account, fitnessOptions)) {
-			result.success(buildAuthState());
+		if (hasFitPermissions(account)) {
+			if (flow == PendingFlow.FETCH_LIVE_METRICS) {
+				readLiveMetrics(result);
+			} else {
+				result.success(buildAuthState());
+			}
 			return;
 		}
 
-		if (pendingResult != null) {
+		if (pendingResult != null && pendingResult != result) {
 			result.error("PENDING", "Another permission operation is already running.", null);
 			return;
 		}
 
 		pendingResult = result;
-		pendingAction = action;
+		pendingFlow = flow;
 		GoogleSignIn.requestPermissions(this, RC_FIT_PERMISSIONS, account, fitnessOptions);
 	}
 
-	private void fetchLiveMetrics(@NonNull MethodChannel.Result result) {
-		GoogleSignInAccount account = GoogleSignIn.getAccountForExtension(this, fitnessOptions);
-		if (account == null) {
-			result.success(buildErrorMetrics("User is not signed in."));
-			return;
-		}
-
-		if (!hasRuntimePermissions()) {
-			result.success(buildErrorMetrics("Activity/Sensor permissions are required."));
-			return;
-		}
-
-		if (!GoogleSignIn.hasPermissions(account, fitnessOptions)) {
+	private void readLiveMetrics(@NonNull MethodChannel.Result result) {
+		GoogleSignInAccount account = getSignedInAccount();
+		if (account == null || !hasFitPermissions(account)) {
 			result.success(buildErrorMetrics("Google Fit permission is not granted."));
 			return;
 		}
@@ -203,103 +355,14 @@ public class MainActivity extends FlutterActivity {
 					DataReadResponse stepsResponse = (DataReadResponse) responses.get(0);
 					DataReadResponse heartResponse = (DataReadResponse) responses.get(1);
 
-					int steps = extractSteps(stepsResponse);
-					int heartRate = extractHeartRate(heartResponse);
-
-					Map<String, Object> payload = new HashMap<>();
-					payload.put("steps", steps);
-					payload.put("heartRate", heartRate);
+					Map<String, Object> payload = new LinkedHashMap<>();
+					payload.put("steps", extractSteps(stepsResponse));
+					payload.put("heartRate", extractHeartRate(heartResponse));
 					payload.put("timestamp", System.currentTimeMillis());
 					payload.put("permissionDenied", false);
 					result.success(payload);
 				})
 				.addOnFailureListener(error -> result.success(buildErrorMetrics(error.getMessage())));
-	}
-
-	@Override
-	protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-		super.onActivityResult(requestCode, resultCode, data);
-		Log.d(TAG, "onActivityResult requestCode=" + requestCode + " resultCode=" + resultCode);
-
-		if (requestCode == RC_SIGN_IN) {
-			if (pendingResult == null) {
-				return;
-			}
-
-			try {
-				GoogleSignInAccount account = GoogleSignIn.getSignedInAccountFromIntent(data)
-						.getResult(ApiException.class);
-				if (account == null) {
-					completePendingWithError("Sign-in was cancelled.");
-					return;
-				}
-
-				if (GoogleSignIn.hasPermissions(account, fitnessOptions)) {
-					MethodChannel.Result result = pendingResult;
-					clearPending();
-					result.success(buildAuthState());
-				} else {
-					GoogleSignIn.requestPermissions(this, RC_FIT_PERMISSIONS, account, fitnessOptions);
-				}
-			} catch (ApiException exception) {
-				Log.e(TAG, "Google sign-in failed with code=" + exception.getStatusCode(), exception);
-				completePendingWithError("Google sign-in failed.");
-			}
-			return;
-		}
-
-		if (requestCode == RC_FIT_PERMISSIONS) {
-			if (pendingResult == null) {
-				return;
-			}
-
-			GoogleSignInAccount account = GoogleSignIn.getLastSignedInAccount(this);
-			if (account != null && GoogleSignIn.hasPermissions(account, fitnessOptions)) {
-				MethodChannel.Result result = pendingResult;
-				clearPending();
-				result.success(buildAuthState());
-			} else {
-				completePendingWithError("Google Fit permission denied.");
-			}
-		}
-	}
-
-	@Override
-	public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
-		super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-
-		if (requestCode != RC_RUNTIME_PERMISSIONS || pendingResult == null) {
-			return;
-		}
-
-		boolean granted = true;
-		for (int value : grantResults) {
-			if (value != PackageManager.PERMISSION_GRANTED) {
-				granted = false;
-				break;
-			}
-		}
-
-		MethodChannel.Result result = pendingResult;
-		String action = pendingAction;
-		clearPending();
-
-		if (!granted) {
-			result.success(buildAuthState());
-			return;
-		}
-
-		if ("signInInteractive".equals(action)) {
-			startSignInFlow(result);
-			return;
-		}
-
-		if ("requestFitnessPermissions".equals(action)) {
-			requestFitnessPermissions(result);
-			return;
-		}
-
-		result.success(true);
 	}
 
 	private long startOfDayMillis() {
@@ -332,7 +395,6 @@ public class MainActivity extends FlutterActivity {
 			return totalSteps;
 		}
 
-		// Fallback for devices where aggregate buckets return non-derived sets.
 		for (DataSet dataSet : response.getDataSets()) {
 			for (DataPoint point : dataSet.getDataPoints()) {
 				for (Field field : point.getDataType().getFields()) {
@@ -387,14 +449,14 @@ public class MainActivity extends FlutterActivity {
 	}
 
 	private Map<String, Object> buildAuthState() {
-		GoogleSignInAccount account = GoogleSignIn.getLastSignedInAccount(this);
+		GoogleSignInAccount account = getSignedInAccount();
 
 		Map<String, Object> state = new HashMap<>();
 		state.put("isSignedIn", account != null);
 		state.put("displayName", account != null && account.getDisplayName() != null ? account.getDisplayName() : "");
-		state.put("fitPermissionGranted", account != null && GoogleSignIn.hasPermissions(account, fitnessOptions));
+		state.put("fitPermissionGranted", hasFitPermissions(account));
 		state.put("runtimePermissionGranted", hasRuntimePermissions());
-		state.put("apiKeyConfigured", !BuildConfig.API_KEY.isEmpty());
+		state.put("apiKeyConfigured", isApiKeyConfigured());
 		return state;
 	}
 
@@ -404,24 +466,18 @@ public class MainActivity extends FlutterActivity {
 		return state;
 	}
 
-	private Map<String, Object> buildErrorMetrics(String message) {
+	private Map<String, Object> buildErrorMetrics(@Nullable String message) {
 		Map<String, Object> payload = new HashMap<>();
 		payload.put("steps", 0);
 		payload.put("heartRate", 0);
 		payload.put("timestamp", System.currentTimeMillis());
 		payload.put("permissionDenied", true);
-		payload.put("message", message == null ? "Unable to read Google Fit data." : message);
+		payload.put("message", message == null || message.isEmpty() ? "Unable to read Google Fit data." : message);
 		return payload;
 	}
 
 	private boolean hasRuntimePermissions() {
-		List<String> required = new ArrayList<>();
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-			required.add(Manifest.permission.ACTIVITY_RECOGNITION);
-		}
-		required.add(Manifest.permission.BODY_SENSORS);
-
-		for (String permission : required) {
+		for (String permission : requiredRuntimePermissions()) {
 			if (ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) {
 				return false;
 			}
@@ -429,32 +485,24 @@ public class MainActivity extends FlutterActivity {
 		return true;
 	}
 
-	private void requestRuntimePermissions(@NonNull String action, @NonNull MethodChannel.Result result) {
-		List<String> required = new ArrayList<>();
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-				&& ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION)
-				!= PackageManager.PERMISSION_GRANTED) {
-			required.add(Manifest.permission.ACTIVITY_RECOGNITION);
-		}
+	private boolean hasFitPermissions(@Nullable GoogleSignInAccount account) {
+		return account != null && GoogleSignIn.hasPermissions(account, fitnessOptions);
+	}
 
-		if (ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS)
-				!= PackageManager.PERMISSION_GRANTED) {
-			required.add(Manifest.permission.BODY_SENSORS);
-		}
+	@Nullable
+	private GoogleSignInAccount getSignedInAccount() {
+		return GoogleSignIn.getLastSignedInAccount(this);
+	}
 
-		if (required.isEmpty()) {
-			result.success(true);
-			return;
+	private String[] requiredRuntimePermissions() {
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+			return new String[] { Manifest.permission.ACTIVITY_RECOGNITION, Manifest.permission.BODY_SENSORS };
 		}
+		return new String[] { Manifest.permission.BODY_SENSORS };
+	}
 
-		if (pendingResult != null) {
-			result.error("PENDING", "Another runtime permission request is already running.", null);
-			return;
-		}
-
-		pendingResult = result;
-		pendingAction = action;
-		ActivityCompat.requestPermissions(this, required.toArray(new String[0]), RC_RUNTIME_PERMISSIONS);
+	private boolean isApiKeyConfigured() {
+		return BuildConfig.API_KEY != null && !BuildConfig.API_KEY.isEmpty();
 	}
 
 	private void completePendingWithError(@NonNull String message) {
@@ -468,6 +516,6 @@ public class MainActivity extends FlutterActivity {
 
 	private void clearPending() {
 		pendingResult = null;
-		pendingAction = null;
+		pendingFlow = PendingFlow.NONE;
 	}
 }

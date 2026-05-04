@@ -183,15 +183,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/app_state_provider.dart';
-import 'package:google_sign_in/google_sign_in.dart';
-
-final GoogleSignIn _googleSignIn = GoogleSignIn(
-  scopes: [
-    'email',
-    'https://www.googleapis.com/auth/fitness.activity.read',
-    'https://www.googleapis.com/auth/fitness.body.read',
-  ],
-);
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -206,30 +197,14 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isSignUpMode = false;
   bool _navigated = false;
 
-  // ✅ Google Sign-In function
   Future<void> signInWithGoogle() async {
-    try {
-      final account = await _googleSignIn.signIn();
-
-      // ❗ User cancelled
-      if (account == null) {
-        print("User cancelled login");
-        return;
-      }
-
-      // ✅ Get access token
-      final auth = await account.authentication;
-      final accessToken = auth.accessToken;
-
-      print("User: ${account.email}");
-      print("Access Token: $accessToken");
-
-      if (!mounted) return;
-
-      // ✅ Navigate to home
+    final appProvider = context.read<AppStateProvider>();
+    final success = await appProvider.signInWithGoogle();
+    if (!mounted) {
+      return;
+    }
+    if (success) {
       Navigator.of(context).pushReplacementNamed('/home');
-    } catch (error) {
-      print("Error: $error");
     }
   }
 

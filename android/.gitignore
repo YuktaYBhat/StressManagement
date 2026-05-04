@@ -54,6 +54,7 @@ macos/Flutter/Flutter.framework
 # System files
 # =========================
 .DS_Store
+
 Thumbs.db
 
 # =========================

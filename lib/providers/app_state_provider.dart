@@ -66,12 +66,55 @@ class AppStateProvider extends ChangeNotifier {
     isLoading = true;
     notifyListeners();
 
-    // Keep startup light: app opens to login and waits for user credentials.
-    isSignedIn = false;
-    statusMessage = '';
+    final authState = await _bridge.getAuthState();
+    _applyGoogleAuthState(authState);
+
+    if (isSignedIn) {
+      await refreshData(notify: false);
+      _startRefreshLoop();
+    }
 
     isLoading = false;
     notifyListeners();
+  }
+
+  Future<bool> signInWithGoogle() async {
+    isLoading = true;
+    statusMessage = '';
+    notifyListeners();
+
+    final signedInState = await _bridge.signInInteractive();
+    if (!signedInState.isSignedIn) {
+      isLoading = false;
+      statusMessage = signedInState.message.isEmpty
+          ? 'Google sign-in was cancelled.'
+          : signedInState.message;
+      notifyListeners();
+      return false;
+    }
+
+    GoogleFitAuthState authState = signedInState;
+    if (!signedInState.fitPermissionGranted || !signedInState.runtimePermissionGranted) {
+      authState = await _bridge.requestFitnessPermissions();
+    }
+
+    _applyGoogleAuthState(authState);
+    if (!isSignedIn || !fitPermissionGranted || !runtimePermissionGranted) {
+      isLoading = false;
+      statusMessage = authState.message.isEmpty
+          ? 'Google Fit permissions are required to continue.'
+          : authState.message;
+      notifyListeners();
+      return false;
+    }
+
+    await refreshData(notify: false);
+    _startRefreshLoop();
+
+    isLoading = false;
+    statusMessage = '';
+    notifyListeners();
+    return true;
   }
 
   Future<bool> loginWithEmail({
@@ -211,6 +254,23 @@ class AppStateProvider extends ChangeNotifier {
 
     resetSession();
     notifyListeners();
+  }
+
+  void _applyGoogleAuthState(GoogleFitAuthState authState) {
+    isSignedIn = authState.isSignedIn;
+    fitPermissionGranted = authState.fitPermissionGranted;
+    runtimePermissionGranted = authState.runtimePermissionGranted;
+    permissionDenied = false;
+    if (authState.displayName.isNotEmpty) {
+      userDisplayName = authState.displayName;
+    }
+    if (!authState.apiKeyConfigured && authState.isSignedIn) {
+      statusMessage = 'API key is not configured in Android local.properties.';
+    } else if (authState.message.isNotEmpty) {
+      statusMessage = authState.message;
+    } else {
+      statusMessage = '';
+    }
   }
 
   AnalyticsData analyticsDataFor(String range) {

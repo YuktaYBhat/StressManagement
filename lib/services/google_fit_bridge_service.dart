@@ -29,6 +29,35 @@ class LiveMetrics {
   }
 }
 
+class GoogleFitAuthState {
+  const GoogleFitAuthState({
+    required this.isSignedIn,
+    required this.displayName,
+    required this.fitPermissionGranted,
+    required this.runtimePermissionGranted,
+    required this.apiKeyConfigured,
+    required this.message,
+  });
+
+  final bool isSignedIn;
+  final String displayName;
+  final bool fitPermissionGranted;
+  final bool runtimePermissionGranted;
+  final bool apiKeyConfigured;
+  final String message;
+
+  factory GoogleFitAuthState.fromMap(Map<dynamic, dynamic> raw) {
+    return GoogleFitAuthState(
+      isSignedIn: raw['isSignedIn'] == true,
+      displayName: (raw['displayName'] ?? '').toString(),
+      fitPermissionGranted: raw['fitPermissionGranted'] == true,
+      runtimePermissionGranted: raw['runtimePermissionGranted'] == true,
+      apiKeyConfigured: raw['apiKeyConfigured'] == true,
+      message: (raw['message'] ?? '').toString(),
+    );
+  }
+}
+
 class GoogleFitBridgeService {
   static const MethodChannel _channel = MethodChannel(
     'stress_sense/google_fit',
@@ -37,6 +66,21 @@ class GoogleFitBridgeService {
   Future<LiveMetrics> fetchLiveMetrics() async {
     final response = await _invokeMap('fetchLiveMetrics');
     return LiveMetrics.fromMap(response);
+  }
+
+  Future<GoogleFitAuthState> getAuthState() async {
+    final response = await _invokeMap('getAuthState');
+    return GoogleFitAuthState.fromMap(response);
+  }
+
+  Future<GoogleFitAuthState> signInInteractive() async {
+    final response = await _invokeMap('signInInteractive');
+    return GoogleFitAuthState.fromMap(response);
+  }
+
+  Future<GoogleFitAuthState> requestFitnessPermissions() async {
+    final response = await _invokeMap('requestFitnessPermissions');
+    return GoogleFitAuthState.fromMap(response);
   }
 
   Future<void> signOut() async {

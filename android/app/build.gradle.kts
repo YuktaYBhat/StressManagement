@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.gradle.api.tasks.Copy
 
 plugins {
     id("com.android.application")
@@ -71,10 +72,33 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.1")
 
     // Google Play services: Auth (Sign-In) and Fitness
-    implementation("com.google.android.gms:play-services-auth:20.7.0'")
+    implementation("com.google.android.gms:play-services-auth:20.7.0")
     implementation("com.google.android.gms:play-services-fitness:21.1.0")
 }
 
 flutter {
     source = "../.."
 }
+
+val flutterRootApkDir = rootProject.projectDir.parentFile.resolve("build/app/outputs/flutter-apk")
+
+tasks.register<Copy>("copyDebugFlutterApk") {
+    from(layout.buildDirectory.dir("outputs/flutter-apk"))
+    include("app-debug.apk")
+    into(flutterRootApkDir)
+}
+
+tasks.register<Copy>("copyReleaseFlutterApk") {
+    from(layout.buildDirectory.dir("outputs/flutter-apk"))
+    include("app-release.apk")
+    into(flutterRootApkDir)
+}
+
+tasks.matching { it.name == "assembleDebug" }.configureEach {
+    finalizedBy("copyDebugFlutterApk")
+}
+
+tasks.matching { it.name == "assembleRelease" }.configureEach {
+    finalizedBy("copyReleaseFlutterApk")
+}
+
